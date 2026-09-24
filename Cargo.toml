@@ -1,5 +1,5 @@
 [package]
-name = "poker-engine"
+name = "poker_engine"
 description = "A high-performance, modular, and feature-complete No-Limit Texas Hold'em (NLHE) poker engine written in idiomatic Rust."
 authors = ["Nawasan <zocketzero@proton.me>"]
 version = "0.0.1"
