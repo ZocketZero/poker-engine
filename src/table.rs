@@ -416,7 +416,9 @@ impl Table {
                         p.acted_this_round = false;
                     }
                 }
-                Action::Bet(amount)
+                // Record the actual committed amount, not the requested amount.
+                // A short-stacked player may go all-in for less than `amount`.
+                Action::Bet(chips_committed)
             }
             Action::Raise(total) => {
                 let current_bet = self.seats[seat].as_ref().unwrap().current_bet;
@@ -453,7 +455,9 @@ impl Table {
                         }
                     }
                 }
-                Action::Raise(total)
+                // Record the actual settled raise level, not the requested total.
+                // A short-stacked player may go all-in for less than `total`.
+                Action::Raise(self.highest_bet)
             }
             Action::AllIn => {
                 let p = self.seats[seat].as_ref().unwrap();
