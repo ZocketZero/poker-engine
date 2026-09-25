@@ -339,7 +339,49 @@ fn test_min_raise_after_short_all_in_bet() {
     assert!(legal.min_raise >= 20, "Min raise must be at least the big blind (20), got {}", legal.min_raise);
 }
 
+#[test]
+fn test_min_raise_size_after_short_stack_allin_bet() {
+    // Regression test for Bug 1:
+    // When a short-stacked player goes all-in as a bet (no prior bet in the round),
+    // min_raise_size must be based on the ACTUAL chips committed, not a hypothetical
+    // larger amount. The AllIn action delegates to Bet(player.chips), so amount ==
+    // chips_committed, but validate the downstream raise minimum is correct.
+    let mut table = Table::new(TableConfig {
+        small_blind: 5,
+        big_blind: 10,
+        ante: 0,
+        max_players: 3,
+    });
 
+    // Bob has only 20 chips on the flop — he will go all-in as a bet.
+    table.sit_player(0, Player::new(0, "Alice", 1000)).unwrap();
+    table.sit_player(1, Player::new(1, "Bob", 30)).unwrap();
+    table.sit_player(2, Player::new(2, "Charlie", 1000)).unwrap();
 
+    table.start_hand().unwrap();
+    // P0 is button (UTG preflop), P1 is SB (posts 5), P2 is BB (posts 10).
+    table.apply_action(Action::Call).unwrap();   // P0 calls 10
+    table.apply_action(Action::Call).unwrap();   // P1 calls 5 more (now has 20)
+    table.apply_action(Action::Check).unwrap();  // P2 checks
+
+    // Flop: Bob (P1) acts first with 20 chips remaining. Bob goes all-in (bets 20).
+    // chips_committed = 20, highest_bet = 20, min_raise_size = max(20, big_blind=10) = 20.
+    assert_eq!(table.stage, poker_engine::events::Stage::Flop);
+    assert_eq!(table.current_player, Some(1));
+    table.apply_action(Action::AllIn).unwrap(); // Bob all-in bets 20
+
+    // Charlie (P2) is next. Alice (P0) is still active behind Charlie.
+    // Correct: min_raise = highest_bet(20) + min_raise_size(20) = 40.
+    let legal = table.legal_actions(2).unwrap();
+    assert!(
+        legal.can_raise,
+        "Charlie should be able to raise since Alice (P0) is still active"
+    );
+    assert_eq!(
+        legal.min_raise, 40,
+        "min_raise should be 40 (20+20), got {}",
+        legal.min_raise
+    );
+}
 
 

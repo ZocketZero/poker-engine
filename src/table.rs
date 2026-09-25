@@ -401,7 +401,10 @@ impl Table {
                     chips_committed = p.commit_chips(amount);
                     p.acted_this_round = true;
                     self.highest_bet = p.current_bet;
-                    self.min_raise_size = amount.max(self.config.big_blind);
+                    // Use chips_committed (actual chips put in) rather than the requested
+                    // `amount`, because a short-stacked player may commit less than `amount`
+                    // (all-in for less). The raise increment must be based on the real bet size.
+                    self.min_raise_size = chips_committed.max(self.config.big_blind);
                 }
                 self.pot_manager.contribute(seat, chips_committed);
                 // Reset acted_this_round for all other active players
@@ -602,9 +605,8 @@ impl Table {
     fn deal_runout_board(&mut self) {
         if self.board.is_empty() {
             for _ in 0..3 {
-                if let Some(card) = self.deck.deal() {
-                    self.board.push(card);
-                }
+                let card = self.deck.deal().expect("Deck ran out of cards while dealing the flop");
+                self.board.push(card);
             }
             self.events.push(GameEvent::StreetStarted {
                 stage: Stage::Flop,
@@ -612,18 +614,16 @@ impl Table {
             });
         }
         if self.board.len() == 3 {
-            if let Some(card) = self.deck.deal() {
-                self.board.push(card);
-            }
+            let card = self.deck.deal().expect("Deck ran out of cards while dealing the turn");
+            self.board.push(card);
             self.events.push(GameEvent::StreetStarted {
                 stage: Stage::Turn,
                 board: self.board.clone(),
             });
         }
         if self.board.len() == 4 {
-            if let Some(card) = self.deck.deal() {
-                self.board.push(card);
-            }
+            let card = self.deck.deal().expect("Deck ran out of cards while dealing the river");
+            self.board.push(card);
             self.events.push(GameEvent::StreetStarted {
                 stage: Stage::River,
                 board: self.board.clone(),
@@ -662,9 +662,8 @@ impl Table {
             Stage::PreFlop => {
                 self.stage = Stage::Flop;
                 for _ in 0..3 {
-                    if let Some(card) = self.deck.deal() {
-                        self.board.push(card);
-                    }
+                    let card = self.deck.deal().expect("Deck ran out of cards while dealing the flop");
+                    self.board.push(card);
                 }
                 self.events.push(GameEvent::StreetStarted {
                     stage: Stage::Flop,
@@ -673,9 +672,8 @@ impl Table {
             }
             Stage::Flop => {
                 self.stage = Stage::Turn;
-                if let Some(card) = self.deck.deal() {
-                    self.board.push(card);
-                }
+                let card = self.deck.deal().expect("Deck ran out of cards while dealing the turn");
+                self.board.push(card);
                 self.events.push(GameEvent::StreetStarted {
                     stage: Stage::Turn,
                     board: self.board.clone(),
@@ -683,9 +681,8 @@ impl Table {
             }
             Stage::Turn => {
                 self.stage = Stage::River;
-                if let Some(card) = self.deck.deal() {
-                    self.board.push(card);
-                }
+                let card = self.deck.deal().expect("Deck ran out of cards while dealing the river");
+                self.board.push(card);
                 self.events.push(GameEvent::StreetStarted {
                     stage: Stage::River,
                     board: self.board.clone(),
@@ -773,6 +770,14 @@ impl Table {
         // Evaluate all hands
         let mut showdown_hands = Vec::new();
         let mut hand_ranks = std::collections::HashMap::new();
+
+        // Sanity check: board must have exactly 5 cards at showdown.
+        assert_eq!(
+            self.board.len(),
+            5,
+            "Showdown reached with {} board card(s) instead of 5 — deck or street dealing is broken",
+            self.board.len()
+        );
 
         for &seat in &eligible_seats {
             let p = self.seats[seat].as_ref().unwrap();
