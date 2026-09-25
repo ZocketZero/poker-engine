@@ -264,9 +264,14 @@ impl FromStr for Card {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
         let chars: Vec<char> = s.chars().collect();
+        if chars.len() == 3 && s.starts_with("10") {
+            let rank = Rank::Ten;
+            let suit = Suit::from_char(chars[2])?;
+            return Ok(Card::new(rank, suit));
+        }
         if chars.len() != 2 {
             return Err(format!(
-                "Card string must be exactly 2 characters (e.g. 'As', 'Th'), got '{s}'"
+                "Card string must be 2 characters (e.g. 'As', 'Th') or '10x' (e.g. '10s'), got '{s}'"
             ));
         }
         let rank = Rank::from_char(chars[0])?;
@@ -305,6 +310,15 @@ mod tests {
         assert_eq!(ten_diamonds.rank(), Rank::Ten);
         assert_eq!(ten_diamonds.suit(), Suit::Diamonds);
         assert_eq!(ten_diamonds.to_string(), "T♦");
+
+        let ten_spades = Card::from_str("10s").unwrap();
+        assert_eq!(ten_spades.rank(), Rank::Ten);
+        assert_eq!(ten_spades.suit(), Suit::Spades);
+        assert_eq!(ten_spades.to_string(), "T♠");
+
+        let ten_hearts = Card::from_str("10h").unwrap();
+        assert_eq!(ten_hearts.rank(), Rank::Ten);
+        assert_eq!(ten_hearts.suit(), Suit::Hearts);
     }
 
     #[test]

@@ -79,4 +79,17 @@ impl Player {
         }
         committed
     }
+
+    /// Deduct ante chips from stack and add to total invested without increasing current_bet.
+    /// Returns the actual amount deducted (capped by player chips).
+    pub fn post_ante(&mut self, amount: u64) -> u64 {
+        let committed = amount.min(self.chips);
+        self.chips -= committed;
+        self.total_invested += committed;
+        if self.chips == 0 && self.status == PlayerStatus::Active {
+            self.status = PlayerStatus::AllIn;
+        }
+        committed
+    }
 }
+

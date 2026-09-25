@@ -75,6 +75,9 @@ impl Table {
         }
         let mut p = player;
         p.id = seat;
+        if self.stage != Stage::HandEnded {
+            p.status = PlayerStatus::SittingOut;
+        }
         self.seats[seat] = Some(p);
         Ok(())
     }
@@ -166,6 +169,9 @@ impl Table {
         if eligible.len() < 2 {
             return Err("At least 2 players with chips are required to start a hand".to_string());
         }
+        if self.config.big_blind == 0 {
+            return Err("Big blind must be greater than 0".to_string());
+        }
 
         self.hand_count += 1;
         self.events.clear();
@@ -212,7 +218,7 @@ impl Table {
         if self.config.ante > 0 {
             for &seat in &eligible {
                 if let Some(p) = self.seats[seat].as_mut() {
-                    let ante_paid = p.commit_chips(self.config.ante);
+                    let ante_paid = p.post_ante(self.config.ante);
                     self.pot_manager.contribute(seat, ante_paid);
                     self.events.push(GameEvent::AntePosted {
                         player_id: seat,
@@ -308,7 +314,11 @@ impl Table {
         };
         let max_bet = if can_bet { player.chips } else { 0 };
 
-        let can_raise = self.highest_bet > 0 && player.chips > to_call;
+        let has_active_opponent = self.seats.iter().enumerate().any(|(idx, opt)| {
+            idx != seat && opt.as_ref().is_some_and(|p| p.status == PlayerStatus::Active)
+        });
+
+        let can_raise = self.highest_bet > 0 && player.chips > to_call && has_active_opponent;
         let min_raise = if can_raise {
             let target = self.highest_bet + self.min_raise_size;
             let max_total = player.current_bet + player.chips;
@@ -322,8 +332,13 @@ impl Table {
             0
         };
 
-        let can_all_in = player.chips > 0;
-        let all_in_cost = player.chips;
+        let can_all_in = player.chips > 0
+            && (has_active_opponent || to_call >= player.chips || self.highest_bet == 0);
+        let all_in_cost = if !has_active_opponent && self.highest_bet > 0 && to_call < player.chips {
+            to_call
+        } else {
+            player.chips
+        };
 
         Some(LegalActions {
             can_fold,
@@ -386,7 +401,7 @@ impl Table {
                     chips_committed = p.commit_chips(amount);
                     p.acted_this_round = true;
                     self.highest_bet = p.current_bet;
-                    self.min_raise_size = amount;
+                    self.min_raise_size = amount.max(self.config.big_blind);
                 }
                 self.pot_manager.contribute(seat, chips_committed);
                 // Reset acted_this_round for all other active players
@@ -443,9 +458,13 @@ impl Table {
                 let current_bet = p.current_bet;
                 let total = current_bet + chips;
 
+                let has_active_opponent = self.seats.iter().enumerate().any(|(idx, opt)| {
+                    idx != seat && opt.as_ref().is_some_and(|p| p.status == PlayerStatus::Active)
+                });
+
                 if self.highest_bet == 0 {
                     return self.apply_action(Action::Bet(chips));
-                } else if total <= self.highest_bet {
+                } else if total <= self.highest_bet || !has_active_opponent {
                     return self.apply_action(Action::Call);
                 } else {
                     return self.apply_action(Action::Raise(total));
@@ -515,36 +534,100 @@ impl Table {
     }
 
     fn refund_uncalled_bets(&mut self) {
-        let in_hand: Vec<(usize, u64)> = self
+        // Collect current_bet of ALL seated players who participated in the round
+        let bets: Vec<(usize, u64)> = self
             .seats
             .iter()
             .enumerate()
-            .filter_map(|(idx, p)| {
-                p.as_ref()
-                    .filter(|p| p.is_in_hand())
-                    .map(|p| (idx, p.current_bet))
-            })
+            .filter_map(|(idx, p)| p.as_ref().map(|p| (idx, p.current_bet)))
             .collect();
 
-        if in_hand.len() <= 1 {
+        if bets.is_empty() {
             return;
         }
 
-        let mut bets: Vec<u64> = in_hand.iter().map(|&(_, bet)| bet).collect();
-        bets.sort_unstable();
-        let second_highest = bets[bets.len() - 2];
-        let highest = bets[bets.len() - 1];
+        let mut sorted_bets = bets.clone();
+        sorted_bets.sort_by_key(|&(_, bet)| bet);
+
+        let (leader_seat, highest) = *sorted_bets.last().unwrap();
+        if highest == 0 {
+            return;
+        }
+
+        let second_highest = if sorted_bets.len() >= 2 {
+            sorted_bets[sorted_bets.len() - 2].1
+        } else {
+            0
+        };
+
+        let baseline = if self.stage == Stage::PreFlop {
+            self.config.big_blind
+        } else {
+            0
+        };
 
         if highest > second_highest {
-            let uncalled = highest - second_highest;
-            let leader_seat = in_hand.iter().find(|&&(_, bet)| bet == highest).unwrap().0;
-            if let Some(p) = self.seats[leader_seat].as_mut() {
-                p.chips += uncalled;
-                p.current_bet -= uncalled;
-                p.total_invested -= uncalled;
+            let uncalled = if self.stage == Stage::PreFlop {
+                if highest > baseline {
+                    highest - second_highest.max(baseline)
+                } else {
+                    let active_or_allin_opponents = self.seats.iter().enumerate().any(|(idx, opt)| {
+                        idx != leader_seat && opt.as_ref().is_some_and(|p| p.is_in_hand())
+                    });
+                    if active_or_allin_opponents {
+                        highest - second_highest
+                    } else {
+                        0
+                    }
+                }
+            } else {
+                highest - second_highest
+            };
+
+            if uncalled > 0 {
+                if let Some(p) = self.seats[leader_seat].as_mut() {
+                    p.chips += uncalled;
+                    p.current_bet -= uncalled;
+                    p.total_invested -= uncalled;
+                    if p.chips > 0 && p.status == PlayerStatus::AllIn {
+                        p.status = PlayerStatus::Active;
+                    }
+                }
+                self.pot_manager.refund(leader_seat, uncalled);
+                self.highest_bet = self.highest_bet.min(second_highest.max(baseline));
             }
-            self.pot_manager.refund(leader_seat, uncalled);
-            self.highest_bet = second_highest;
+        }
+    }
+
+    fn deal_runout_board(&mut self) {
+        if self.board.is_empty() {
+            for _ in 0..3 {
+                if let Some(card) = self.deck.deal() {
+                    self.board.push(card);
+                }
+            }
+            self.events.push(GameEvent::StreetStarted {
+                stage: Stage::Flop,
+                board: self.board.clone(),
+            });
+        }
+        if self.board.len() == 3 {
+            if let Some(card) = self.deck.deal() {
+                self.board.push(card);
+            }
+            self.events.push(GameEvent::StreetStarted {
+                stage: Stage::Turn,
+                board: self.board.clone(),
+            });
+        }
+        if self.board.len() == 4 {
+            if let Some(card) = self.deck.deal() {
+                self.board.push(card);
+            }
+            self.events.push(GameEvent::StreetStarted {
+                stage: Stage::River,
+                board: self.board.clone(),
+            });
         }
     }
 
@@ -569,12 +652,7 @@ impl Table {
 
         // If fewer than 2 active players (e.g. 0 or 1 active, others all-in), no more betting rounds!
         if active_count <= 1 {
-            // Deal remaining board cards directly
-            while self.board.len() < 5 {
-                if let Some(card) = self.deck.deal() {
-                    self.board.push(card);
-                }
-            }
+            self.deal_runout_board();
             self.stage = Stage::Showdown;
             self.handle_showdown();
             return;
@@ -641,11 +719,7 @@ impl Table {
 
         if self.active_players_count() <= 1 {
             // Everyone is all-in preflop! Run out the board
-            while self.board.len() < 5 {
-                if let Some(card) = self.deck.deal() {
-                    self.board.push(card);
-                }
-            }
+            self.deal_runout_board();
             self.stage = Stage::Showdown;
             self.handle_showdown();
             return;
