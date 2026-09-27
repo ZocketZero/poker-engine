@@ -54,6 +54,8 @@ pub enum GameEvent {
     PlayerActed {
         player_id: usize,
         action: Action,
+        /// Chips moved into the pot by this action.
+        /// Always 0 for `Fold` and `Check` — clients must not treat this as an error.
         chips_committed: u64,
     },
     StreetStarted {
