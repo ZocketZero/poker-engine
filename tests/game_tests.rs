@@ -384,4 +384,181 @@ fn test_min_raise_size_after_short_stack_allin_bet() {
     );
 }
 
+// =============================================================================
+// Tests for the new rich query API
+// =============================================================================
 
+#[test]
+fn test_blind_seats_tracked_correctly() {
+    // 3-player game: Button=0, SB=1, BB=2
+    let mut table = Table::new(TableConfig {
+        small_blind: 10,
+        big_blind: 20,
+        ante: 0,
+        max_players: 3,
+    });
+    table.sit_player(0, Player::new(0, "Alice", 1000)).unwrap();
+    table.sit_player(1, Player::new(1, "Bob", 1000)).unwrap();
+    table.sit_player(2, Player::new(2, "Charlie", 1000)).unwrap();
+
+    table.start_hand().unwrap();
+    // First hand: button = seat 0 (first eligible), SB = seat 1, BB = seat 2.
+    assert_eq!(table.button, 0);
+    assert_eq!(table.small_blind_seat, Some(1));
+    assert_eq!(table.big_blind_seat, Some(2));
+}
+
+#[test]
+fn test_heads_up_blind_seats() {
+    // Heads-up: button == SB.
+    let mut table = Table::new(TableConfig {
+        small_blind: 10,
+        big_blind: 20,
+        ante: 0,
+        max_players: 2,
+    });
+    table.sit_player(0, Player::new(0, "Alice", 1000)).unwrap();
+    table.sit_player(1, Player::new(1, "Bob", 1000)).unwrap();
+
+    table.start_hand().unwrap();
+    // Button (seat 0) is SB in heads-up.
+    assert_eq!(table.small_blind_seat, Some(table.button));
+    assert_ne!(table.small_blind_seat, table.big_blind_seat);
+}
+
+#[test]
+fn test_current_acting_player_and_hole_cards() {
+    let mut table = Table::new(TableConfig {
+        small_blind: 10,
+        big_blind: 20,
+        ante: 0,
+        max_players: 2,
+    });
+    table.sit_player(0, Player::new(0, "Alice", 1000)).unwrap();
+    table.sit_player(1, Player::new(1, "Bob", 1000)).unwrap();
+
+    table.start_hand().unwrap();
+
+    // current_acting_player must exist and match current_player
+    let actor = table.current_acting_player().expect("someone should act");
+    assert_eq!(Some(actor.id), table.current_player);
+
+    // hole_cards — every seated player should have been dealt 2 cards
+    for seat in 0..2 {
+        let cards = table.hole_cards(seat);
+        assert!(cards.is_some(), "seat {seat} should have hole cards");
+    }
+
+    // visible_hole_cards should list all 2 players
+    let visible = table.visible_hole_cards();
+    assert_eq!(visible.len(), 2);
+}
+
+#[test]
+fn test_pot_winners_after_fold() {
+    let mut table = Table::new(TableConfig {
+        small_blind: 10,
+        big_blind: 20,
+        ante: 0,
+        max_players: 2,
+    });
+    table.sit_player(0, Player::new(0, "Alice", 1000)).unwrap();
+    table.sit_player(1, Player::new(1, "Bob", 1000)).unwrap();
+
+    table.start_hand().unwrap();
+    // Alice (SB) folds — Bob (BB) wins without showdown.
+    table.apply_action(poker_engine::Action::Fold).unwrap();
+
+    assert_eq!(table.stage, poker_engine::Stage::HandEnded);
+
+    let winners = table.pot_winners();
+    assert_eq!(winners.len(), 1);
+    assert_eq!(winners[0].seat, 1, "Bob should be the winner");
+    assert_eq!(winners[0].amount_won, 30, "Bob wins the 10+20 pot");
+    // No showdown → hand_description is None.
+    assert!(winners[0].hand_description.is_none());
+}
+
+#[test]
+fn test_pot_winners_after_showdown() {
+    let mut table = Table::new(TableConfig {
+        small_blind: 10,
+        big_blind: 20,
+        ante: 0,
+        max_players: 2,
+    });
+    table.sit_player(0, Player::new(0, "Alice", 500)).unwrap();
+    table.sit_player(1, Player::new(1, "Bob", 500)).unwrap();
+
+    table.start_hand().unwrap();
+    // Both go all-in → automatic showdown.
+    table.apply_action(poker_engine::Action::AllIn).unwrap();
+    table.apply_action(poker_engine::Action::Call).unwrap();
+
+    assert_eq!(table.stage, poker_engine::Stage::HandEnded);
+
+    let winners = table.pot_winners();
+    assert!(!winners.is_empty(), "at least one pot winner after showdown");
+    // In a showdown, the hand description must be present.
+    for w in &winners {
+        assert!(
+            w.hand_description.is_some(),
+            "showdown winner must have a hand description"
+        );
+        assert!(w.hand_category.is_some());
+    }
+    // Total chips awarded == total pot (no chips destroyed).
+    let total_awarded: u64 = winners.iter().map(|w| w.amount_won).sum();
+    assert_eq!(total_awarded, 1000);
+}
+
+#[test]
+fn test_snapshot_reflects_table_state() {
+    let mut table = Table::new(TableConfig {
+        small_blind: 10,
+        big_blind: 20,
+        ante: 0,
+        max_players: 3,
+    });
+    table.sit_player(0, Player::new(0, "Alice", 1000)).unwrap();
+    table.sit_player(1, Player::new(1, "Bob", 1000)).unwrap();
+    table.sit_player(2, Player::new(2, "Charlie", 1000)).unwrap();
+
+    table.start_hand().unwrap();
+
+    let snap = table.snapshot();
+
+    // Basic fields
+    assert_eq!(snap.hand_id, 1);
+    assert_eq!(snap.stage, poker_engine::Stage::PreFlop);
+    assert!(snap.board.is_empty());
+    assert_eq!(snap.total_pot, 30); // SB 10 + BB 20
+    assert_eq!(snap.small_blind_seat, table.small_blind_seat);
+    assert_eq!(snap.big_blind_seat, table.big_blind_seat);
+    assert_eq!(snap.current_player_seat, table.current_player);
+
+    // Exactly 3 players in snapshot
+    assert_eq!(snap.players.len(), 3);
+
+    // Button / SB / BB flags
+    let btn = snap.players.iter().find(|p| p.is_button).expect("button player");
+    assert_eq!(btn.seat, table.button);
+
+    let sb = snap.players.iter().find(|p| p.is_small_blind).expect("SB player");
+    assert_eq!(Some(sb.seat), table.small_blind_seat);
+
+    let bb = snap.players.iter().find(|p| p.is_big_blind).expect("BB player");
+    assert_eq!(Some(bb.seat), table.big_blind_seat);
+
+    // Exactly one player is currently acting
+    let acting: Vec<_> = snap.players.iter().filter(|p| p.is_acting).collect();
+    assert_eq!(acting.len(), 1);
+
+    // All players have hole cards
+    for p in &snap.players {
+        assert!(p.hole_cards.is_some(), "seat {} should have hole cards", p.seat);
+    }
+
+    // No winners yet (hand still in progress)
+    assert!(snap.pot_winners.is_empty());
+}

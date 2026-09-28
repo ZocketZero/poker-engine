@@ -32,6 +32,10 @@ pub struct Table {
     pub config: TableConfig,
     pub seats: Vec<Option<Player>>,
     pub button: usize,
+    /// Seat index of the Small Blind poster for the current hand (`None` before first hand).
+    pub small_blind_seat: Option<usize>,
+    /// Seat index of the Big Blind poster for the current hand (`None` before first hand).
+    pub big_blind_seat: Option<usize>,
     pub stage: Stage,
     pub board: Vec<Card>,
     pub deck: Deck,
@@ -50,6 +54,8 @@ impl Table {
             config,
             seats: (0..max_players).map(|_| None).collect(),
             button: 0,
+            small_blind_seat: None,
+            big_blind_seat: None,
             stage: Stage::HandEnded,
             board: Vec::with_capacity(5),
             deck: Deck::new(),
@@ -206,6 +212,10 @@ impl Table {
             let bb = self.next_seat_with_chips(sb);
             (sb, bb)
         };
+
+        // Record which seats hold the blinds for this hand
+        self.small_blind_seat = Some(sb_seat);
+        self.big_blind_seat = Some(bb_seat);
 
         self.events.push(GameEvent::HandStarted {
             hand_id: self.hand_count,
@@ -839,4 +849,165 @@ impl Table {
         self.current_player = None;
         self.events.push(GameEvent::HandEnded);
     }
+
+    // -------------------------------------------------------------------------
+    // Rich query helpers
+    // -------------------------------------------------------------------------
+
+    /// Returns a reference to the player who must act right now, or `None` if no
+    /// player action is required (e.g. hand is over, showdown running out).
+    pub fn current_acting_player(&self) -> Option<&Player> {
+        self.current_player
+            .and_then(|seat| self.seats[seat].as_ref())
+    }
+
+    /// Returns the hole cards dealt to the given seat, or `None` if the seat is
+    /// empty or the player has not been dealt in yet.
+    pub fn hole_cards(&self, seat: usize) -> Option<[crate::card::Card; 2]> {
+        self.seats.get(seat)?.as_ref()?.hole_cards
+    }
+
+    /// Returns all players whose hole cards are currently visible (i.e. non-`None`).
+    /// Each entry is `(seat, player, hole_cards)`.
+    pub fn visible_hole_cards(&self) -> Vec<(usize, &Player, [crate::card::Card; 2])> {
+        self.seats
+            .iter()
+            .enumerate()
+            .filter_map(|(seat, opt)| {
+                opt.as_ref().and_then(|p| p.hole_cards.map(|cards| (seat, p, cards)))
+            })
+            .collect()
+    }
+
+    /// Scans the event log of the **current hand** and returns a summary of every
+    /// `PotAwarded` event — i.e. who won, how much, and with what hand (if at showdown).
+    /// Returns an empty `Vec` if the hand is still in progress or no pots have been awarded yet.
+    pub fn pot_winners(&self) -> Vec<PotWinner> {
+        self.events
+            .iter()
+            .filter_map(|ev| {
+                if let GameEvent::PotAwarded {
+                    pot_index,
+                    player_id,
+                    amount,
+                    hand_rank,
+                } = ev
+                {
+                    let player = self.seats[*player_id].as_ref();
+                    Some(PotWinner {
+                        pot_index: *pot_index,
+                        seat: *player_id,
+                        player_name: player.map(|p| p.name.clone()).unwrap_or_default(),
+                        amount_won: *amount,
+                        hand_description: hand_rank.as_ref().map(|r| r.description.clone()),
+                        hand_category: hand_rank.as_ref().map(|r| r.category),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Returns a full, human-readable snapshot of the current table state.
+    pub fn snapshot(&self) -> TableSnapshot {
+        let players: Vec<PlayerSnapshot> = self
+            .seats
+            .iter()
+            .enumerate()
+            .filter_map(|(seat, opt)| {
+                opt.as_ref().map(|p| PlayerSnapshot {
+                    seat,
+                    name: p.name.clone(),
+                    chips: p.chips,
+                    status: p.status,
+                    hole_cards: p.hole_cards,
+                    current_bet: p.current_bet,
+                    total_invested: p.total_invested,
+                    is_button: seat == self.button,
+                    is_small_blind: self.small_blind_seat == Some(seat),
+                    is_big_blind: self.big_blind_seat == Some(seat),
+                    is_acting: self.current_player == Some(seat),
+                })
+            })
+            .collect();
+
+        TableSnapshot {
+            hand_id: self.hand_count,
+            stage: self.stage,
+            board: self.board.clone(),
+            total_pot: self.pot_manager.total_pot(),
+            highest_bet: self.highest_bet,
+            button_seat: self.button,
+            small_blind_seat: self.small_blind_seat,
+            big_blind_seat: self.big_blind_seat,
+            current_player_seat: self.current_player,
+            players,
+            pot_winners: self.pot_winners(),
+        }
+    }
+}
+
+// =============================================================================
+// Snapshot types — rich read-only views of the table state
+// =============================================================================
+
+/// Summary of a single pot award (from `PotAwarded` events in the current hand).
+#[derive(Debug, Clone)]
+pub struct PotWinner {
+    /// Which pot index (0 = main pot, 1+ = side pots).
+    pub pot_index: usize,
+    /// Seat index of the winner.
+    pub seat: usize,
+    /// Display name of the winner.
+    pub player_name: String,
+    /// Number of chips awarded from this pot.
+    pub amount_won: u64,
+    /// Human-readable description of the winning hand, e.g. `"Full House, Aces full of Kings"`.
+    /// `None` when the pot was won without a showdown (everyone else folded).
+    pub hand_description: Option<String>,
+    /// The category of the winning hand (e.g. `HandCategory::FullHouse`).
+    /// `None` when won without a showdown.
+    pub hand_category: Option<crate::evaluator::HandCategory>,
+}
+
+/// A point-in-time snapshot of a single player's state at the table.
+#[derive(Debug, Clone)]
+pub struct PlayerSnapshot {
+    pub seat: usize,
+    pub name: String,
+    pub chips: u64,
+    pub status: crate::player::PlayerStatus,
+    /// The two hole cards dealt to this player, or `None` if not yet dealt / folded before deal.
+    pub hole_cards: Option<[crate::card::Card; 2]>,
+    /// Chips bet in the **current street**.
+    pub current_bet: u64,
+    /// Total chips invested in the entire hand so far.
+    pub total_invested: u64,
+    pub is_button: bool,
+    pub is_small_blind: bool,
+    pub is_big_blind: bool,
+    /// `true` if this player must act right now.
+    pub is_acting: bool,
+}
+
+/// A comprehensive snapshot of the entire table at a given moment.
+#[derive(Debug, Clone)]
+pub struct TableSnapshot {
+    pub hand_id: u64,
+    pub stage: Stage,
+    /// Community cards currently on the board (0–5 cards).
+    pub board: Vec<crate::card::Card>,
+    /// Total chips in all pots combined.
+    pub total_pot: u64,
+    /// The current highest bet in this betting round (players must match this to stay in).
+    pub highest_bet: u64,
+    pub button_seat: usize,
+    pub small_blind_seat: Option<usize>,
+    pub big_blind_seat: Option<usize>,
+    /// Seat of the player who must act, or `None`.
+    pub current_player_seat: Option<usize>,
+    pub players: Vec<PlayerSnapshot>,
+    /// Pot award results from the current hand (populated once the hand ends or after each pot is awarded).
+    pub pot_winners: Vec<PotWinner>,
 }

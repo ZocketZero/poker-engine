@@ -15,4 +15,4 @@ pub use evaluator::{HandCategory, HandRank, evaluate_5, evaluate_7, evaluate_bes
 pub use events::{GameEvent, Stage};
 pub use player::{Player, PlayerStatus};
 pub use pot::{Pot, PotManager, PotPayout};
-pub use table::{Table, TableConfig};
+pub use table::{PlayerSnapshot, PotWinner, Table, TableConfig, TableSnapshot};
